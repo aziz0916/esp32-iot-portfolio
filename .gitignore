@@ -1,0 +1,10 @@
+# ESP-IDF 產生的檔案
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+
+# 本機機密設定
+.env
+.env.*
+!.env.example
