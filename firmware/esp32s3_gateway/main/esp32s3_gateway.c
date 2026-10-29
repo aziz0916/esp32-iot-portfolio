@@ -22,6 +22,9 @@ static const char *TAG = "GATEWAY";
 static const char *target_name = "ESP32_Vitals";
 static esp_gatt_if_t client_if = ESP_GATT_IF_NONE;
 static bool connecting = false;
+static bool scan_requested = false;
+static esp_bd_addr_t target_address;
+static esp_ble_addr_type_t target_address_type;
 static uint16_t service_start_handle = 0;
 static uint16_t service_end_handle = 0;
 static esp_bt_uuid_t vitals_char_uuid = {
@@ -67,12 +70,55 @@ static void vitals_read_task(void *arg)
     }
 }
 
+static void request_scan(void)
+{
+    if (scan_requested) {
+        return;
+    }
+
+    scan_requested = true;
+    esp_err_t err = esp_ble_gap_start_scanning(0);
+    if (err != ESP_OK) {
+        scan_requested = false;
+        ESP_LOGE(TAG, "Failed to request scan: %s", esp_err_to_name(err));
+    }
+}
+
 static void gap_event_handler(esp_gap_ble_cb_event_t event,
                               esp_ble_gap_cb_param_t *param)
 {
+    if (event == ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT) {
+        if (param->scan_stop_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+            scan_requested = false;
+
+            if (connecting) {
+                esp_err_t err = esp_ble_gattc_open(
+                    client_if, target_address, target_address_type, true);
+
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Connection request failed: %s",
+                             esp_err_to_name(err));
+                    connecting = false;
+                    request_scan();
+                }
+            }
+        } else {
+            ESP_LOGE(TAG, "Scan stop failed: %d",
+                     param->scan_stop_cmpl.status);
+            connecting = false;
+        }
+    }
+    if (event == ESP_GAP_BLE_SCAN_START_COMPLETE_EVT) {
+        if (param->scan_start_cmpl.status != ESP_BT_STATUS_SUCCESS) {
+            scan_requested = false;
+            ESP_LOGE(TAG, "Scan start failed: %d",
+                    param->scan_start_cmpl.status);
+        }
+    }
+
     if (event == ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT) {
         if (param->scan_param_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-            ESP_ERROR_CHECK(esp_ble_gap_start_scanning(0));
+            request_scan();
         }
     }
 
@@ -90,12 +136,9 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
             if (!connecting && client_if != ESP_GATT_IF_NONE) {
                 connecting = true;
                 ESP_LOGI(TAG, "Found target: %.*s", name_len, (char *)name);
+                memcpy(target_address, param->scan_rst.bda, sizeof(target_address));
+                target_address_type = param->scan_rst.ble_addr_type;
                 ESP_ERROR_CHECK(esp_ble_gap_stop_scanning());
-                ESP_ERROR_CHECK(esp_ble_gattc_open(
-                    client_if,
-                    param->scan_rst.bda,
-                    param->scan_rst.ble_addr_type,
-                    true));
             }
         }
     }
@@ -123,7 +166,7 @@ static void gattc_event_handler(esp_gattc_cb_event_t event,
         } else {
             ESP_LOGE(TAG, "Connection failed: %d", param->open.status);
             connecting = false;
-            ESP_ERROR_CHECK(esp_ble_gap_start_scanning(0));
+            request_scan();
         }
     }
 
@@ -201,7 +244,7 @@ static void gattc_event_handler(esp_gattc_cb_event_t event,
         connecting = false;
         service_start_handle = 0;
         service_end_handle = 0;
-        ESP_ERROR_CHECK(esp_ble_gap_start_scanning(0));
+        request_scan();
     }
 }
 
