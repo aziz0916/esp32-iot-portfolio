@@ -8,4 +8,8 @@ config GATEWAY_WIFI_PASSWORD
     string "Wi-Fi password"
     default ""
 
+config GATEWAY_MQTT_BROKER_URI
+    string "MQTT broker URI"
+    default ""
+
 endmenu

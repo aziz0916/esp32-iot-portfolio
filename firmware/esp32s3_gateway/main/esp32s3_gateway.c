@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include <string.h>
 #include "sdkconfig.h"
+#include "mqtt_client.h"
 
 typedef struct {
     bool connected;
@@ -23,6 +24,8 @@ typedef struct {
 
 static QueueHandle_t vitals_queue = NULL;
 static const char *TAG = "GATEWAY";
+static esp_mqtt_client_handle_t mqtt_client = NULL;
+static bool mqtt_connected = false;
 static const char *target_name = "ESP32_Vitals";
 static esp_gatt_if_t client_if = ESP_GATT_IF_NONE;
 static bool connecting = false;
@@ -231,6 +234,22 @@ static void gattc_event_handler(esp_gattc_cb_event_t event,
             param->read.value_len >= 2) {
             ESP_LOGI(TAG, "SpO2: %u%%, heart rate: %u bpm",
                     param->read.value[0], param->read.value[1]);
+            if (mqtt_connected && mqtt_client != NULL) {
+                char payload[64];
+
+                snprintf(payload, sizeof(payload),
+                        "{\"spo2\":%u,\"heart_rate\":%u}",
+                        param->read.value[0], param->read.value[1]);
+
+                int message_id = esp_mqtt_client_publish(
+                    mqtt_client, "esp32/vitals", payload, 0, 0, 0);
+
+                if (message_id < 0) {
+                    ESP_LOGE(TAG, "MQTT publish failed");
+                } else {
+                    ESP_LOGI(TAG, "MQTT publish requested: %s", payload);
+                }
+            }
         } else {
             ESP_LOGE(TAG, "Read failed or unexpected length: status=%d, length=%u",
                     param->read.status, param->read.value_len);
@@ -252,6 +271,38 @@ static void gattc_event_handler(esp_gattc_cb_event_t event,
     }
 }
 
+static void mqtt_event_handler(void *handler_args,
+                               esp_event_base_t base,
+                               int32_t event_id,
+                               void *event_data)
+{
+    if (event_id == MQTT_EVENT_CONNECTED) {
+        mqtt_connected = true;
+        ESP_LOGI(TAG, "MQTT connected");
+    } else if (event_id == MQTT_EVENT_DISCONNECTED) {
+        mqtt_connected = false;
+        ESP_LOGW(TAG, "MQTT disconnected");
+    }
+}
+
+static void mqtt_start(void)
+{
+    esp_mqtt_client_config_t mqtt_config = {
+        .broker.address.uri = CONFIG_GATEWAY_MQTT_BROKER_URI,
+    };
+
+    mqtt_client = esp_mqtt_client_init(&mqtt_config);
+    esp_mqtt_client_handle_t client = mqtt_client;
+    if (client == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize MQTT client");
+        return;
+    }
+
+    ESP_ERROR_CHECK(esp_mqtt_client_register_event(
+        client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_mqtt_client_start(client));
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
@@ -264,6 +315,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ESP_LOGI(TAG, "Wi-Fi connected and received an IP address");
+
+        static bool mqtt_started = false;
+        if (!mqtt_started) {
+            mqtt_start();
+            mqtt_started = true;
+        }
     }
 }
 
