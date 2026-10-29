@@ -1,3 +1,6 @@
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -9,6 +12,7 @@
 #include "esp_gattc_api.h"
 #include "esp_log.h"
 #include <string.h>
+#include "sdkconfig.h"
 
 typedef struct {
     bool connected;
@@ -248,6 +252,46 @@ static void gattc_event_handler(esp_gattc_cb_event_t event,
     }
 }
 
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        ESP_LOGI(TAG, "Wi-Fi started, connecting");
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT &&
+               event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        ESP_LOGW(TAG, "Wi-Fi disconnected, reconnecting");
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ESP_LOGI(TAG, "Wi-Fi connected and received an IP address");
+    }
+}
+
+static void wifi_init_sta(void)
+{
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&init_config));
+
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL));
+
+    wifi_config_t wifi_config = {0};
+    strlcpy((char *)wifi_config.sta.ssid, CONFIG_GATEWAY_WIFI_SSID,
+            sizeof(wifi_config.sta.ssid));
+    strlcpy((char *)wifi_config.sta.password, CONFIG_GATEWAY_WIFI_PASSWORD,
+            sizeof(wifi_config.sta.password));
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
 void app_main(void)
 {
     vitals_queue = xQueueCreate(1, sizeof(vitals_read_context_t));
@@ -264,6 +308,7 @@ void app_main(void)
         return;
     }
     ESP_ERROR_CHECK(nvs_flash_init());
+    wifi_init_sta();
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
     ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
