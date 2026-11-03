@@ -8,3 +8,9 @@ managed_components/
 .env
 .env.*
 !.env.example
+# Python virtual environment
+.venv/
+
+# Local receiver database
+receiver/*.db
+receiver/*.db-*
