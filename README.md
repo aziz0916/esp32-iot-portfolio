@@ -6,7 +6,7 @@
 
 1. ESP32 發送端模擬血氧（SpO2）與心率資料，透過 BLE 提供給網關讀取。
 2. ESP32-S3 網關讀取 BLE 資料，並透過 Wi-Fi 發布至 MQTT broker。
-3. Python 接收程式訂閱 MQTT 資料，將結果儲存至本機 SQLite 資料庫。
+3. Python 接收程式訂閱 MQTT 資料，將結果儲存至本機 SQLite 資料庫，並透過 API 傳送至 NocoBase。
 
 目前資料為模擬數值，約每 5 秒傳送一次。
 
@@ -17,6 +17,7 @@
 - Wi-Fi 與 MQTT：網關發布資料至 broker
 - Eclipse Mosquitto：本機 MQTT broker
 - Python 與 SQLite：接收並儲存資料
+- NocoBase 與 PostgreSQL：透過 API 接收並顯示生命徵象資料
 - Docker Compose：啟動 MQTT broker
 
 ## MQTT 資料格式
@@ -40,23 +41,62 @@ docker compose -f mqtt/compose.yaml up -d
 
 目前 broker 使用 TCP port `1883`，並允許匿名連線，適合本機開發與測試。
 
+## 啟動 NocoBase
+
+先啟動 Docker Desktop，再於 WSL 的專案根目錄執行：
+
+```bash
+cp -n nocobase/.env.example nocobase/.env
+```
+
+編輯 `nocobase/.env`，自行設定隨機的 `APP_KEY` 和資料庫密碼 `DB_PASSWORD`。請勿將 `.env` 提交到 Git。
+
+設定完成後，執行：
+
+```bash
+docker compose -f nocobase/compose.yaml up -d
+```
+
+啟動後，在瀏覽器開啟 `http://localhost:13002`。
+
 ## 啟動資料接收程式
 
-在 Dev Container 的專案根目錄執行：
+先在 NocoBase 手動建立 `esp32_vitals` collection，加入以下欄位：
+
+- `spo2`：整數，血氧百分比
+- `heart_rate`：整數，心率（bpm）
+- `received_at`：日期與時間
+
+接著建立 API key，並讓其角色具有此 collection 的新增權限，以及上述三個欄位的新增權限。
+
+在 Dev Container 的專案根目錄建立虛擬環境並安裝套件：
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r receiver/requirements.txt
+```
+
+在同一個終端機安全輸入 API key：
+
+```bash
+export NOCOBASE_API_KEY="$(.venv/bin/python -c 'import getpass; print(getpass.getpass("請貼上 API key：").strip())')"
+```
+
+輸入時畫面不會顯示字元。請勿將 API key 寫入程式碼或提交到 Git。
+
+啟動接收程式：
+
+```bash
 .venv/bin/python receiver/receiver.py
 ```
 
-預設 broker 位址為 `host.docker.internal:1883`，供 Dev Container 連線至本機 broker。若 broker 位於其他主機，可透過環境變數指定主機名稱或 IP：
+預設 broker 位址為 `host.docker.internal:1883`。若 broker 位於其他主機，可在啟動時指定主機名稱或 IP：
 
 ```bash
 MQTT_HOST=192.168.1.100 .venv/bin/python receiver/receiver.py
 ```
 
-請將 `192.168.1.100` 換成實際的 broker 位址。收到資料後，程式會儲存至 `receiver/vitals.db`。
+請將範例 IP 換成實際的 broker 位址。收到資料後，程式會先儲存至 `receiver/vitals.db`，再傳送至 NocoBase。
 
 ## 查看最近的資料
 
