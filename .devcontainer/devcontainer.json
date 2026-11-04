@@ -3,6 +3,7 @@
 	"build": {
 		"dockerfile": "Dockerfile"
 	},
+	"runArgs": ["--device=/dev/ttyUSB0:/dev/ttyUSB0"],
 	// Pre-configure ESP-IDF extension
 	"settings": {
 		"idf.showOnboardingOnInit": false,
