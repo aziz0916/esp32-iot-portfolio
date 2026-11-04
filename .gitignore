@@ -14,3 +14,7 @@ managed_components/
 # Local receiver database
 receiver/*.db
 receiver/*.db-*
+
+# Python 快取
+__pycache__/
+*.py[cod]

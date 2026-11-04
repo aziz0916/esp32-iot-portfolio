@@ -1,6 +1,7 @@
 import os
 
 import paho.mqtt.client as mqtt
+import requests
 
 import sqlite3
 from pathlib import Path
@@ -13,6 +14,8 @@ BROKER_HOST = os.environ.get("MQTT_HOST", "host.docker.internal")
 BROKER_PORT = 1883
 TOPIC = "esp32/vitals"
 DB_PATH = Path(__file__).resolve().parent / "vitals.db"
+NOCOBASE_URL = "http://host.docker.internal:13002/api/esp32_vitals:create"
+NOCOBASE_API_KEY = os.environ.get("NOCOBASE_API_KEY", "")
 
 def init_database():
     with sqlite3.connect(DB_PATH) as connection:
@@ -26,6 +29,27 @@ def init_database():
             )
             """
         )
+
+def send_to_nocobase(spo2, heart_rate, received_at):
+    if not NOCOBASE_API_KEY:
+        print("NocoBase 傳送失敗：尚未設定 API key", flush=True)
+        return
+
+    try:
+        response = requests.post(
+            NOCOBASE_URL,
+            headers={"Authorization": f"Bearer {NOCOBASE_API_KEY}"},
+            json={
+                "spo2": spo2,
+                "heart_rate": heart_rate,
+                "received_at": received_at,
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        print("已傳送至 NocoBase", flush=True)
+    except requests.RequestException as error:
+        print(f"NocoBase 傳送失敗：{error}", flush=True)
 
 def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code.is_failure:
@@ -59,6 +83,7 @@ def on_message(client, userdata, message):
             f"received_at={received_at}",
             flush=True,
         )
+        send_to_nocobase(spo2, heart_rate, received_at)
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError,
             ValueError, sqlite3.Error) as error:
         print(f"訊息處理失敗：{error}", flush=True)
