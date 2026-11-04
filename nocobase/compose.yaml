@@ -1,0 +1,40 @@
+name: esp32-iot-nocobase
+
+services:
+  app:
+    image: nocobase/nocobase:latest-full
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_KEY: ${APP_KEY:?請設定 APP_KEY}
+      DB_DIALECT: postgres
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: nocobase
+      DB_USER: nocobase
+      DB_PASSWORD: ${DB_PASSWORD:?請設定 DB_PASSWORD}
+      TZ: Asia/Taipei
+    ports:
+      - "127.0.0.1:13002:80"
+    volumes:
+      - app_storage:/app/nocobase/storage
+
+  postgres:
+    image: postgres:16
+    command: postgres -c wal_level=logical
+    environment:
+      POSTGRES_DB: nocobase
+      POSTGRES_USER: nocobase
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?請設定 DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nocobase -d nocobase"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  app_storage:
+  postgres_data:
