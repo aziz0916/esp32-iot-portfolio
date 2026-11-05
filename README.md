@@ -98,6 +98,10 @@ MQTT_HOST=192.168.1.100 .venv/bin/python receiver/receiver.py
 
 請將範例 IP 換成實際的 broker 位址。收到資料後，程式會先儲存至 `receiver/vitals.db`，再傳送至 NocoBase。
 
+如果 NocoBase 暫時無法連線，新資料會保留在 SQLite 中，狀態為 `pending`。恢復連線後，接收程式會在收到下一筆 MQTT 訊息時嘗試補傳，每次最多處理 50 筆。傳送成功後，狀態會更新為 `sent`。
+
+更新功能前的舊資料標記為 `legacy`，不會自動補傳。如果 NocoBase 已寫入資料但回應遺失，重試可能造成重複紀錄。
+
 ## 查看最近的資料
 
 在 Dev Container 的專案根目錄執行：

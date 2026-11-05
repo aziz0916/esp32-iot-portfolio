@@ -25,15 +25,24 @@ def init_database():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 received_at TEXT NOT NULL,
                 spo2 INTEGER NOT NULL,
-                heart_rate INTEGER NOT NULL
+                heart_rate INTEGER NOT NULL,
+                sync_status TEXT NOT NULL DEFAULT 'legacy'
             )
             """
         )
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(vitals)")
+        }
+        if "sync_status" not in columns:
+            connection.execute(
+                "ALTER TABLE vitals "
+                "ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'legacy'"
+            )
 
 def send_to_nocobase(spo2, heart_rate, received_at):
     if not NOCOBASE_API_KEY:
         print("NocoBase 傳送失敗：尚未設定 API key", flush=True)
-        return
+        return False
 
     try:
         response = requests.post(
@@ -48,8 +57,29 @@ def send_to_nocobase(spo2, heart_rate, received_at):
         )
         response.raise_for_status()
         print("已傳送至 NocoBase", flush=True)
+        return True
     except requests.RequestException as error:
         print(f"NocoBase 傳送失敗：{error}", flush=True)
+        return False
+
+def get_pending_records():
+    with sqlite3.connect(DB_PATH) as connection:
+        return connection.execute(
+            "SELECT id, spo2, heart_rate, received_at "
+            "FROM vitals WHERE sync_status = ? ORDER BY id LIMIT 50",
+            ("pending",),
+        ).fetchall()
+
+def retry_pending_records():
+    for record_id, spo2, heart_rate, received_at in get_pending_records():
+        if not send_to_nocobase(spo2, heart_rate, received_at):
+            break
+
+        with sqlite3.connect(DB_PATH) as connection:
+            connection.execute(
+                "UPDATE vitals SET sync_status = ? WHERE id = ?",
+                ("sent", record_id),
+            )
 
 def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code.is_failure:
@@ -73,9 +103,9 @@ def on_message(client, userdata, message):
 
         with sqlite3.connect(DB_PATH) as connection:
             connection.execute(
-                "INSERT INTO vitals (received_at, spo2, heart_rate) "
-                "VALUES (?, ?, ?)",
-                (received_at, spo2, heart_rate),
+                "INSERT INTO vitals (received_at, spo2, heart_rate, sync_status) "
+                "VALUES (?, ?, ?, ?)",
+                (received_at, spo2, heart_rate, "pending"),
             )
 
         print(
@@ -83,7 +113,7 @@ def on_message(client, userdata, message):
             f"received_at={received_at}",
             flush=True,
         )
-        send_to_nocobase(spo2, heart_rate, received_at)
+        retry_pending_records()
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError,
             ValueError, sqlite3.Error) as error:
         print(f"訊息處理失敗：{error}", flush=True)
