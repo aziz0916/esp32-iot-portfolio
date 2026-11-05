@@ -1,4 +1,5 @@
 import os
+import threading
 
 import paho.mqtt.client as mqtt
 import requests
@@ -81,6 +82,15 @@ def retry_pending_records():
                 ("sent", record_id),
             )
 
+def retry_worker(stop_event):
+    while not stop_event.is_set():
+        try:
+            retry_pending_records()
+        except sqlite3.Error as error:
+            print(f"補傳資料庫錯誤：{error}", flush=True)
+
+        stop_event.wait(10)
+
 def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code.is_failure:
         print(f"MQTT 連線失敗：{reason_code}", flush=True)
@@ -113,7 +123,6 @@ def on_message(client, userdata, message):
             f"received_at={received_at}",
             flush=True,
         )
-        retry_pending_records()
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError,
             ValueError, sqlite3.Error) as error:
         print(f"訊息處理失敗：{error}", flush=True)
@@ -124,4 +133,17 @@ client.on_connect = on_connect
 client.on_message = on_message
 
 client.connect(BROKER_HOST, BROKER_PORT, 60)
-client.loop_forever()
+
+stop_event = threading.Event()
+worker = threading.Thread(target=retry_worker, args=(stop_event,))
+worker.start()
+
+try:
+    client.loop_forever()
+except KeyboardInterrupt:
+    print("正在停止接收程式…", flush=True)
+finally:
+    stop_event.set()
+    worker.join()
+    client.disconnect()
+    print("接收程式已停止", flush=True)
