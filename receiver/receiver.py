@@ -1,4 +1,5 @@
 import os
+import uuid
 import threading
 
 import paho.mqtt.client as mqtt
@@ -16,6 +17,7 @@ BROKER_PORT = 1883
 TOPIC = "esp32/vitals"
 DB_PATH = Path(__file__).resolve().parent / "vitals.db"
 NOCOBASE_URL = "http://host.docker.internal:13002/api/esp32_vitals:create"
+NOCOBASE_LIST_URL = "http://host.docker.internal:13002/api/esp32_vitals:list"
 NOCOBASE_API_KEY = os.environ.get("NOCOBASE_API_KEY", "")
 
 def init_database():
@@ -27,7 +29,8 @@ def init_database():
                 received_at TEXT NOT NULL,
                 spo2 INTEGER NOT NULL,
                 heart_rate INTEGER NOT NULL,
-                sync_status TEXT NOT NULL DEFAULT 'legacy'
+                sync_status TEXT NOT NULL DEFAULT 'legacy',
+                event_id TEXT
             )
             """
         )
@@ -39,8 +42,85 @@ def init_database():
                 "ALTER TABLE vitals "
                 "ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'legacy'"
             )
+        if "event_id" not in columns:
+            connection.execute(
+                "ALTER TABLE vitals ADD COLUMN event_id TEXT"
+            )
+        pending_without_id = connection.execute(
+            "SELECT id FROM vitals "
+            "WHERE sync_status = ? AND event_id IS NULL",
+            ("pending",),
+        ).fetchall()
+        for (record_id,) in pending_without_id:
+            connection.execute(
+                "UPDATE vitals SET event_id = ? WHERE id = ?",
+                (str(uuid.uuid4()), record_id),
+            )
 
-def send_to_nocobase(spo2, heart_rate, received_at):
+def record_exists_in_nocobase(spo2, heart_rate, received_at, event_id):
+    try:
+        response = requests.get(
+            NOCOBASE_LIST_URL,
+            headers={"Authorization": f"Bearer {NOCOBASE_API_KEY}"},
+            params={"filter": json.dumps({"event_id": event_id})},
+            timeout=10,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict):
+            print("查詢既有資料失敗：回應格式不正確", flush=True)
+            return False
+        records = result.get("data")
+
+        if not isinstance(records, list) or len(records) != 1:
+            print("無法確認既有資料：查詢結果不是一筆", flush=True)
+            return False
+
+        record = records[0]
+        if not isinstance(record, dict):
+            print("查詢既有資料失敗：資料格式不正確", flush=True)
+            return False
+
+        if not isinstance(received_at, str) or not isinstance(
+            record.get("received_at"), str
+        ):
+            print("查詢既有資料失敗：接收時間格式不正確", flush=True)
+            return False
+        # NocoBase 回傳的時間可能只保留到毫秒。
+        local_time = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+        remote_time = datetime.fromisoformat(
+            record["received_at"].replace("Z", "+00:00")
+        )
+        if local_time.utcoffset() is None or remote_time.utcoffset() is None:
+            raise ValueError("接收時間缺少時區")
+
+        local_time = local_time.astimezone(timezone.utc)
+        remote_time = remote_time.astimezone(timezone.utc)
+        local_time = local_time.replace(
+            microsecond=(local_time.microsecond // 1000) * 1000
+        )
+        remote_time = remote_time.replace(
+            microsecond=(remote_time.microsecond // 1000) * 1000
+        )
+
+        matches = (
+            record.get("event_id") == event_id
+            and type(record.get("spo2")) is int
+            and record["spo2"] == spo2
+            and type(record.get("heart_rate")) is int
+            and record["heart_rate"] == heart_rate
+            and local_time == remote_time
+        )
+
+        if not matches:
+            print("既有資料內容不相符，保留待補傳狀態", flush=True)
+
+        return matches
+    except (requests.RequestException, ValueError, KeyError, TypeError) as error:
+        print(f"查詢既有資料失敗：{error}", flush=True)
+        return False
+
+def send_to_nocobase(spo2, heart_rate, received_at, event_id):
     if not NOCOBASE_API_KEY:
         print("NocoBase 傳送失敗：尚未設定 API key", flush=True)
         return False
@@ -50,12 +130,19 @@ def send_to_nocobase(spo2, heart_rate, received_at):
             NOCOBASE_URL,
             headers={"Authorization": f"Bearer {NOCOBASE_API_KEY}"},
             json={
+                "event_id": event_id,
                 "spo2": spo2,
                 "heart_rate": heart_rate,
                 "received_at": received_at,
             },
             timeout=10,
         )
+        if response.status_code == 400:
+            if record_exists_in_nocobase(
+                spo2, heart_rate, received_at, event_id
+            ):
+                print("既有資料核對相符，視為已傳送", flush=True)
+                return True
         response.raise_for_status()
         print("已傳送至 NocoBase", flush=True)
         return True
@@ -66,14 +153,14 @@ def send_to_nocobase(spo2, heart_rate, received_at):
 def get_pending_records():
     with sqlite3.connect(DB_PATH) as connection:
         return connection.execute(
-            "SELECT id, spo2, heart_rate, received_at "
+            "SELECT id, spo2, heart_rate, received_at, event_id "
             "FROM vitals WHERE sync_status = ? ORDER BY id LIMIT 50",
             ("pending",),
         ).fetchall()
 
 def retry_pending_records():
-    for record_id, spo2, heart_rate, received_at in get_pending_records():
-        if not send_to_nocobase(spo2, heart_rate, received_at):
+    for record_id, spo2, heart_rate, received_at, event_id in get_pending_records():
+        if not send_to_nocobase(spo2, heart_rate, received_at, event_id):
             break
 
         with sqlite3.connect(DB_PATH) as connection:
@@ -110,12 +197,14 @@ def on_message(client, userdata, message):
             raise ValueError("spo2 和 heart_rate 必須是整數")
 
         received_at = datetime.now(timezone.utc).isoformat()
+        event_id = str(uuid.uuid4())
 
         with sqlite3.connect(DB_PATH) as connection:
             connection.execute(
-                "INSERT INTO vitals (received_at, spo2, heart_rate, sync_status) "
-                "VALUES (?, ?, ?, ?)",
-                (received_at, spo2, heart_rate, "pending"),
+                "INSERT INTO vitals "
+                "(received_at, spo2, heart_rate, sync_status, event_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (received_at, spo2, heart_rate, "pending", event_id),
             )
 
         print(

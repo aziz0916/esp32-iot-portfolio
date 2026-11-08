@@ -66,8 +66,12 @@ docker compose -f nocobase/compose.yaml up -d
 - `spo2`：整數，血氧百分比
 - `heart_rate`：整數，心率（bpm）
 - `received_at`：日期與時間
+- `event_id`：單行文字，啟用 Unique（唯一）索引
 
-接著建立 API key，並讓其角色具有此 collection 的新增權限，以及上述三個欄位的新增權限。
+接著建立 API key，並設定其角色對此 collection 的權限：
+
+- 允許新增資料，並允許新增上述四個欄位。
+- 允許查看資料，並允許查看上述四個欄位，供重試時核對既有紀錄。查看範圍可設為 Own records；此範圍依資料建立者判斷，同一使用者透過其他方式建立的資料也可能包含在內。API key 所屬使用者必須能查看先前寫入的紀錄，才能完成核對。
 
 在 Dev Container 的專案根目錄建立虛擬環境並安裝套件：
 
@@ -100,7 +104,11 @@ MQTT_HOST=192.168.1.100 .venv/bin/python receiver/receiver.py
 
 如果 NocoBase 暫時無法連線，新資料會保留在 SQLite 中，狀態為 `pending`。接收程式執行時，背景工作會定期嘗試補傳，每次最多處理 50 筆；不需要等待新的 MQTT 訊息。傳送成功後，狀態會更新為 `sent`。
 
-更新功能前的舊資料標記為 `legacy`，不會自動補傳。如果 NocoBase 已寫入資料但回應遺失，重試可能造成重複紀錄。
+更新功能前的舊資料標記為 `legacy`，不會自動補傳。
+
+每筆新資料會產生並保存唯一的 `event_id`。如果 NocoBase 已寫入資料但回應遺失，程式重試時會查詢既有紀錄；只有識別碼、血氧、心率和接收時間都相符，才會將本機資料標記為 `sent`。若查詢失敗或內容不符，資料會維持 `pending`，等待後續處理。
+
+NocoBase 必須將 `event_id` 設為唯一索引，才能防止相同識別碼重複新增。啟用此功能前已存在但缺少 `event_id` 的舊資料，無法透過此機制可靠判斷是否已傳送。
 
 ## 查看最近的資料
 
@@ -110,7 +118,7 @@ MQTT_HOST=192.168.1.100 .venv/bin/python receiver/receiver.py
 .venv/bin/python -c "import sqlite3; c = sqlite3.connect('receiver/vitals.db'); print(*c.execute('SELECT * FROM vitals ORDER BY id DESC LIMIT 5'), sep='\n'); c.close()"
 ```
 
-結果會顯示最近五筆資料，欄位依序為：編號、接收時間、血氧與心率。接收時間使用 UTC 時區。
+結果會顯示最近五筆資料，欄位依序為：編號、接收時間、血氧、心率、同步狀態與資料識別碼。接收時間使用 UTC 時區。
 
 ## 設定 ESP32-S3 網關
 
