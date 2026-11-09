@@ -69,23 +69,30 @@ def record_exists_in_nocobase(spo2, heart_rate, received_at, event_id):
         result = response.json()
         if not isinstance(result, dict):
             print("查詢既有資料失敗：回應格式不正確", flush=True)
-            return False
+            return "retry"
         records = result.get("data")
 
         if not isinstance(records, list) or len(records) != 1:
             print("無法確認既有資料：查詢結果不是一筆", flush=True)
-            return False
+            return "retry"
 
         record = records[0]
         if not isinstance(record, dict):
             print("查詢既有資料失敗：資料格式不正確", flush=True)
-            return False
+            return "retry"
 
         if not isinstance(received_at, str) or not isinstance(
             record.get("received_at"), str
         ):
             print("查詢既有資料失敗：接收時間格式不正確", flush=True)
-            return False
+            return "retry"
+        if (
+            record.get("event_id") != event_id
+            or type(record.get("spo2")) is not int
+            or type(record.get("heart_rate")) is not int
+        ):
+            print("查詢既有資料失敗：識別碼或資料格式不正確", flush=True)
+            return "retry"
         # NocoBase 回傳的時間可能只保留到毫秒。
         local_time = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
         remote_time = datetime.fromisoformat(
@@ -113,17 +120,18 @@ def record_exists_in_nocobase(spo2, heart_rate, received_at, event_id):
         )
 
         if not matches:
-            print("既有資料內容不相符，保留待補傳狀態", flush=True)
+            print("既有資料內容不相符", flush=True)
+            return "conflict"
 
-        return matches
+        return "match"
     except (requests.RequestException, ValueError, KeyError, TypeError) as error:
         print(f"查詢既有資料失敗：{error}", flush=True)
-        return False
+        return "retry"
 
 def send_to_nocobase(spo2, heart_rate, received_at, event_id):
     if not NOCOBASE_API_KEY:
         print("NocoBase 傳送失敗：尚未設定 API key", flush=True)
-        return False
+        return "retry"
 
     try:
         response = requests.post(
@@ -138,17 +146,20 @@ def send_to_nocobase(spo2, heart_rate, received_at, event_id):
             timeout=10,
         )
         if response.status_code == 400:
-            if record_exists_in_nocobase(
+            result = record_exists_in_nocobase(
                 spo2, heart_rate, received_at, event_id
-            ):
+            )
+            if result == "match":
                 print("既有資料核對相符，視為已傳送", flush=True)
-                return True
+                return "sent"
+            if result == "conflict":
+                return "conflict"
         response.raise_for_status()
         print("已傳送至 NocoBase", flush=True)
-        return True
+        return "sent"
     except requests.RequestException as error:
         print(f"NocoBase 傳送失敗：{error}", flush=True)
-        return False
+        return "retry"
 
 def get_pending_records():
     with sqlite3.connect(DB_PATH) as connection:
@@ -160,14 +171,21 @@ def get_pending_records():
 
 def retry_pending_records():
     for record_id, spo2, heart_rate, received_at, event_id in get_pending_records():
-        if not send_to_nocobase(spo2, heart_rate, received_at, event_id):
+        result = send_to_nocobase(spo2, heart_rate, received_at, event_id)
+
+        if result not in ("sent", "conflict"):
+            # 連線或查詢失敗時保留 pending，稍後再試。
             break
 
         with sqlite3.connect(DB_PATH) as connection:
             connection.execute(
-                "UPDATE vitals SET sync_status = ? WHERE id = ?",
-                ("sent", record_id),
+                "UPDATE vitals SET sync_status = ? "
+                "WHERE id = ? AND sync_status = ?",
+                (result, record_id, "pending"),
             )
+
+        if result == "conflict":
+            print(f"資料 ID {record_id} 發生衝突，請檢查", flush=True)
 
 def retry_worker(stop_event):
     while not stop_event.is_set():
