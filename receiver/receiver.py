@@ -239,13 +239,19 @@ client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 client.on_connect = on_connect
 client.on_message = on_message
 
-client.connect(BROKER_HOST, BROKER_PORT, 60)
-
 stop_event = threading.Event()
 worker = threading.Thread(target=retry_worker, args=(stop_event,))
 worker.start()
 
 try:
+    while not stop_event.is_set():
+        try:
+            client.connect(BROKER_HOST, BROKER_PORT, 60)
+            break
+        except OSError as error:
+            print(f"MQTT 連線失敗，10 秒後重試：{error}", flush=True)
+            stop_event.wait(10)
+
     client.loop_forever()
 except KeyboardInterrupt:
     print("正在停止接收程式…", flush=True)
