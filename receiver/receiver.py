@@ -231,7 +231,7 @@ def on_message(client, userdata, message):
             flush=True,
         )
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError,
-            ValueError, sqlite3.Error) as error:
+            ValueError, OverflowError, sqlite3.Error) as error:
         print(f"訊息處理失敗：{error}", flush=True)
 
 init_database()
