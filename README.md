@@ -120,6 +120,34 @@ NocoBase 必須將 `event_id` 設為唯一索引，才能防止相同識別碼�
 
 結果會顯示最近五筆資料，欄位依序為：編號、接收時間、血氧、心率、同步狀態與資料識別碼。接收時間使用 UTC 時區。
 
+## 查看衝突資料
+
+當本機資料與 NocoBase 中相同 `event_id` 的紀錄內容不符時，接收程式會將本機紀錄標記為 `conflict`。這些紀錄不會自動重試，需人工核對。
+
+在 Dev Container 的專案根目錄執行：
+
+```bash
+.venv/bin/python - <<'PY'
+import sqlite3
+
+with sqlite3.connect("file:receiver/vitals.db?mode=ro", uri=True) as connection:
+    rows = connection.execute(
+        """
+        SELECT id, event_id, received_at, spo2, heart_rate
+        FROM vitals WHERE sync_status = 'conflict'
+        ORDER BY id
+        """
+    ).fetchall()
+    for row in rows:
+        print(row)
+    print("衝突筆數：", len(rows))
+PY
+```
+
+欄位依序為本機編號、資料識別碼、接收時間、血氧與心率。請使用 `event_id` 到 NocoBase 核對紀錄，再依實際情況決定如何處理；不要直接將衝突紀錄視為已傳送。
+
+處理衝突時，先保留兩邊資料並查明差異原因。如果確認本機紀錄與遠端是不同事件，應先確認資料來源，避免直接改用新識別碼造成重複。若修正原因後需要重新嘗試，也應先備份資料庫，再審慎處理該筆紀錄；本程式不會自動修改 `conflict` 紀錄。
+
 ## 設定 ESP32-S3 網關
 
 在 `firmware/esp32s3_gateway` 目錄執行 `idf.py menuconfig`，
