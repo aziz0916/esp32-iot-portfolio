@@ -214,6 +214,9 @@ def on_message(client, userdata, message):
         if type(spo2) is not int or type(heart_rate) is not int:
             raise ValueError("spo2 和 heart_rate 必須是整數")
 
+        if not 0 <= spo2 <= 100:
+            raise ValueError("spo2 必須介於 0 到 100 之間")
+
         received_at = datetime.now(timezone.utc).isoformat()
         event_id = str(uuid.uuid4())
 
